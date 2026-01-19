@@ -4,19 +4,20 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Dict, List
 
 from tkinter import ttk
+import tkinter as tk
+
 
 
 @dataclass
 class _IORowSpec:
     label: str
     key: str
-    button: str
+    button: str = ""
     on_click: Optional[Callable[[], None]] = None
     extra: Optional[str] = None
     default: str = ""
     output: bool = False
     width: int = 24
-
 
 
 class IOField:
@@ -34,22 +35,69 @@ class IOField:
 class Tab:
     def __init__(self, title: str):
         self.title = title
-        self.frame = None  # ttk.Frame after attach
-        self._rows: List[_IORowSpec] = []
+        self.frame: Optional[ttk.Frame] = None
 
-        # public storage: users/callbacks can access values by key
+        self._rows: List[_IORowSpec] = []
         self.values: Dict[str, IOField] = {}
 
-    def _attach(self, notebook: ttk.Notebook):
+        # created on attach
+        self._pw: Optional[ttk.PanedWindow] = None
+        self._col_io: Optional[ttk.Frame] = None
+        self._col_btn: Optional[ttk.Frame] = None
+        self._col_extra: Optional[ttk.Frame] = None
+
+        # how many rows already rendered
+        self._rendered_count: int = 0
+
+    def _attach(self, notebook: ttk.Notebook) -> None:
         self.frame = ttk.Frame(notebook)
         notebook.add(self.frame, text=self.title)
 
-        # Make the tab content expand nicely
-        self.frame.columnconfigure(0, weight=1)
+        # Outer PanedWindow (draggable column sizing)
+        self._pw = tk.PanedWindow(
+            self.frame,
+            orient="horizontal",
+            sashwidth=3,
+            sashrelief="raised",
+            showhandle=True,
+            bd=1,
+        )
+        self._pw.pack(fill="both", expand=True)
 
-        # Render all queued rows
-        for i, spec in enumerate(self._rows):
-            self._render_io_row(i, spec)
+        # --- IO pane is itself a PanedWindow: [Label] | [Entry] ---
+        self._io_pw = tk.PanedWindow(
+            self._pw,
+            orient="horizontal",
+            sashwidth=3,
+            sashrelief="raised",
+            showhandle=True,
+            bd=0,
+        )
+
+        self._col_label = ttk.Frame(self._io_pw, padding=(10, 10))
+        self._col_entry = ttk.Frame(self._io_pw, padding=(10, 10))
+
+        self._io_pw.add(self._col_label)
+        self._io_pw.add(self._col_entry)
+
+        # Other columns
+        self._col_btn = ttk.Frame(self._pw, padding=(10, 10))
+        self._col_extra = ttk.Frame(self._pw, padding=(10, 10))
+
+        # Add panes to the OUTER PanedWindow
+        self._pw.add(self._io_pw)
+        self._pw.add(self._col_btn)
+        self._pw.add(self._col_extra)
+
+        # Grid behavior inside columns
+        self._col_label.columnconfigure(0, weight=1)
+        self._col_entry.columnconfigure(0, weight=1)
+        self._col_btn.columnconfigure(0, weight=0)
+        self._col_extra.columnconfigure(0, weight=1)
+
+        # render queued rows
+        self._render_pending_rows()
+
 
     def add_io_row(
         self,
@@ -63,8 +111,12 @@ class Tab:
         width: int = 24,
     ) -> IOField:
         """
-        One-liner: creates a compact row with:
-        [Label + Input (expands)] | [Button (compact)] | [Extra (optional)]
+        One-liner row:
+          IO column:    [Label][Entry]
+          Button col:   [Button]   (optional)
+          Extra col:    [Extra]    (optional)
+
+        output=True -> Entry becomes readonly (still programmatically settable).
         """
         spec = _IORowSpec(
             label=label,
@@ -76,57 +128,67 @@ class Tab:
             output=output,
             width=width,
         )
-
         self._rows.append(spec)
 
-        # If already attached, render immediately
-        if self.frame is not None:
-            self._render_io_row(len(self._rows) - 1, spec)
-
-        # Return handle (will be bound after render)
-        # If not rendered yet, we return a placeholder that will be replaced in self.values later.
-        # To keep it simple, we return the eventual object by key after render; if not rendered yet,
-        # create a temporary IOField and overwrite it on render.
+        # Create placeholder value immediately so callbacks can reference it
         if key not in self.values:
             from tkinter import StringVar
             self.values[key] = IOField(StringVar(value=default))
+
+        # If already attached, render only what’s new
+        if self.frame is not None:
+            self._render_pending_rows()
+
         return self.values[key]
 
+    def _render_pending_rows(self) -> None:
+        # Only render if attached
+        if (
+            self._col_label is None
+            or self._col_entry is None
+            or self._col_btn is None
+            or self._col_extra is None
+        ):
+            return
+
+        while self._rendered_count < len(self._rows):
+            spec = self._rows[self._rendered_count]
+            self._render_io_row(self._rendered_count, spec)
+            self._rendered_count += 1
+
+
     def _render_io_row(self, row_index: int, spec: _IORowSpec) -> None:
-        assert self.frame is not None
+        # Safety
+        assert (
+            self._col_label is not None
+            and self._col_entry is not None
+            and self._col_btn is not None
+            and self._col_extra is not None
+        )
 
-        # Row container
-        row = ttk.Frame(self.frame, padding=(8, 6))
-        row.grid(row=row_index, column=0, sticky="ew")
-        row.columnconfigure(1, weight=0)  # input expands
+        # --- Label column ---
+        lbl = ttk.Label(self._col_label, text=spec.label)
+        lbl.grid(row=row_index, column=0, sticky="w", pady=4)
 
-        # Label
-        lbl = ttk.Label(row, text=spec.label)
-        lbl.grid(row=0, column=0, sticky="w", padx=(0, 8))
-
-        # Input (StringVar)
-        from tkinter import StringVar
-        var = getattr(self.values.get(spec.key), "_var", None)
-        if var is None:
-            var = StringVar(value=spec.default)
-            self.values[spec.key] = IOField(var)
-        else:
-            # ensure default is applied if it was a placeholder
-            if var.get() == "" and spec.default:
-                var.set(spec.default)
-
-        # Input vs Output field (readonly)
+        # --- Entry column ---
+        var = self.values[spec.key]._var
         entry_state = "readonly" if spec.output else "normal"
+        entry = ttk.Entry(self._col_entry, textvariable=var, width=spec.width, state=entry_state)
+        entry.grid(row=row_index, column=0, sticky="w", pady=4)
 
-        entry = ttk.Entry(row, textvariable=var, width=spec.width, state=entry_state)
-        entry.grid(row=0, column=1, sticky="w")
+        # --- Button column cell ---
+        if spec.button:
+            btn = ttk.Button(self._col_btn, text=spec.button, command=spec.on_click)
+            btn.grid(row=row_index, column=0, sticky="w", pady=4)
+        else:
+            spacer = ttk.Label(self._col_btn, text="")
+            spacer.grid(row=row_index, column=0, sticky="w", pady=4)
 
-
-        # Button (compact)
-        btn = ttk.Button(row, text=spec.button, command=spec.on_click)
-        btn.grid(row=0, column=2, sticky="e", padx=(8, 0))
-
-        # Extra (optional)
+        # --- Extra column cell ---
         if spec.extra:
-            extra_lbl = ttk.Label(row, text=spec.extra)
-            extra_lbl.grid(row=0, column=3, sticky="w", padx=(10, 0))
+            extra_lbl = ttk.Label(self._col_extra, text=spec.extra)
+            extra_lbl.grid(row=row_index, column=0, sticky="w", pady=4)
+        else:
+            spacer = ttk.Label(self._col_extra, text="")
+            spacer.grid(row=row_index, column=0, sticky="w", pady=4)
+
