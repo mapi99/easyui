@@ -8,6 +8,8 @@ import tkinter as tk
 
 
 
+
+
 @dataclass
 class _IORowSpec:
     label: str
@@ -51,6 +53,11 @@ class Tab:
 
     def _attach(self, notebook: ttk.Notebook) -> None:
         self.frame = ttk.Frame(notebook)
+        if hasattr(self, "_post_attach"):
+            for fn in self._post_attach:
+                fn()
+            self._post_attach.clear()
+
         notebook.add(self.frame, text=self.title)
 
         # Outer PanedWindow (draggable column sizing)
@@ -192,3 +199,14 @@ class Tab:
             spacer = ttk.Label(self._col_extra, text="")
             spacer.grid(row=row_index, column=0, sticky="w", pady=4)
 
+
+    def add_live_graph(self, title: str, interval_ms: int, sampler, series, max_points: int = 200, ):
+        from .widgets.live_graph import LiveGraph
+        if self.frame is None:
+            # if not attached yet, queue it like your rows do.
+            # simplest approach: store a callable to run on attach
+            if not hasattr(self, "_post_attach"):
+                self._post_attach = []
+            self._post_attach.append(lambda: LiveGraph(self.frame, title, interval_ms, sampler, series, max_points))
+            return None
+        return LiveGraph(self.frame, title, interval_ms, sampler, series, max_points)
